@@ -5,8 +5,8 @@ An end-to-end full-stack clone of **skribbl.io**, built with **React**, **TypeSc
 ---
 
 ## 🌐 Live Deployment
-* **Live Application URL**: Not deployed yet. Add the Render URL after the service is created and verified.
-* **Status**: Configured for deployment to Render as a unified web service.
+* **Live Application URL**: [https://skribbl-clone-1c9b.onrender.com](https://skribbl-clone-1c9b.onrender.com)
+* **Status**: Live on Render as a unified web service. The frontend, REST health endpoint, and Socket.IO server share the same origin.
 
 ---
 
