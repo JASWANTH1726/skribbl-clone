@@ -81,12 +81,17 @@ export class Game {
     return { hasNext: true, drawer };
   }
 
-  public setChosenWord(word: string): void {
-    this.currentWord = word.trim().toLowerCase();
+  public setChosenWord(word: string): boolean {
+    if (typeof word !== 'string') return false;
+    const normalizedWord = word.trim().toLowerCase();
+    if (this.phase !== 'word_select' || !this.wordOptions.includes(normalizedWord)) return false;
+
+    this.currentWord = normalizedWord;
     this.phase = 'drawing';
     this.timeLeft = this.drawTime;
     this.revealedIndices.clear();
     this.generateMaskedWord();
+    return true;
   }
 
   public generateMaskedWord(): string {

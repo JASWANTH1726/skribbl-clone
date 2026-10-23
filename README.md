@@ -61,7 +61,7 @@ skribbl-clone/
 ├── server/             # Express & Socket.IO server
 │   └── src/
 │       ├── models/     # Player, Room, Game, WordManager, RoomManager
-│       ├── sockets/    # Real-time event handlers
+│       ├── socket.ts   # Real-time event handlers
 │       ├── data/       # Categorized word database
 │       └── test-e2e.ts # 10-step multi-player verification suite
 └── client/             # React + Vite application

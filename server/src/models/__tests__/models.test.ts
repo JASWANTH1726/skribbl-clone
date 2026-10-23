@@ -18,7 +18,9 @@ describe('Player Model', () => {
 
   it('should allow the configured maximum of five hints', () => {
     const game = new Game({ hints: 5 });
-    game.setChosenWord('watermelon');
+    game.phase = 'word_select';
+    game.wordOptions = ['watermelon'];
+    assert.equal(game.setChosenWord('watermelon'), true);
 
     for (let i = 0; i < 5; i++) {
       assert.equal(game.revealHint(), true);
@@ -41,6 +43,23 @@ describe('Player Model', () => {
 });
 
 describe('Game Model', () => {
+  it('rejects unoffered words and words chosen outside the selection phase atomically', () => {
+    const game = new Game();
+    game.wordOptions = ['elephant'];
+    game.timeLeft = 15;
+
+    assert.equal(game.setChosenWord('not offered'), false);
+    assert.equal(game.phase, 'lobby');
+    assert.equal(game.currentWord, null);
+    assert.equal(game.timeLeft, 15);
+
+    game.phase = 'word_select';
+    assert.equal(game.setChosenWord('not offered'), false);
+    assert.equal(game.phase, 'word_select');
+    assert.equal(game.currentWord, null);
+    assert.equal(game.timeLeft, 15);
+  });
+
   it('should initialize game rounds and manage turns', () => {
     const p1 = new Player('p1', 's1', 'P1');
     const p2 = new Player('p2', 's2', 'P2');
@@ -57,7 +76,8 @@ describe('Game Model', () => {
     assert.equal(turn1.drawer?.id, 'p1');
     assert.equal(p1.isDrawing, true);
 
-    game.setChosenWord('elephant');
+    game.wordOptions = ['elephant'];
+    assert.equal(game.setChosenWord('elephant'), true);
     assert.equal(game.phase, 'drawing');
     assert.equal(game.currentWord, 'elephant');
     assert.equal(game.maskedWord, '_ _ _ _ _ _ _ _');
@@ -78,7 +98,9 @@ describe('Game Model', () => {
 
   it('should respect hints disabled (hints = 0)', () => {
     const game = new Game({ hints: 0 });
-    game.setChosenWord('sunshine');
+    game.phase = 'word_select';
+    game.wordOptions = ['sunshine'];
+    assert.equal(game.setChosenWord('sunshine'), true);
     assert.equal(game.maskedWord, '_ _ _ _ _ _ _ _');
 
     // revealHint should strictly return false and reveal no letters

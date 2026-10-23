@@ -17,6 +17,64 @@ export type TypedServer = SocketIOServer<ClientToServerEvents, ServerToClientEve
 
 const wordManager = new WordManager();
 const activeTimers: Map<string, NodeJS.Timeout> = new Map();
+const rateLimits = new Map<string, Map<string, { windowStartedAt: number; count: number }>>();
+const ROOM_ID_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
+const PLAYER_NAME_MAX_LENGTH = 16;
+const MESSAGE_MAX_LENGTH = 50;
+const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+const AVATARS = new Set(['🦊', '🐱', '🐶', '🐼', '🦁', '🐸', '🐵', '🦄']);
+const MAX_STROKE_POINTS = 1000;
+const MAX_ROOM_STROKES = 500;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  return Object.keys(value).every(key => keys.includes(key));
+}
+
+function isValidName(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && value.length <= PLAYER_NAME_MAX_LENGTH
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isValidAvatar(value: unknown): value is string {
+  return value === undefined || (typeof value === 'string' && AVATARS.has(value));
+}
+
+function isValidPoint(value: unknown): value is { x: number; y: number } {
+  return isRecord(value)
+    && hasOnlyKeys(value, ['x', 'y'])
+    && typeof value.x === 'number'
+    && Number.isFinite(value.x)
+    && value.x >= 0
+    && value.x <= 1
+    && typeof value.y === 'number'
+    && Number.isFinite(value.y)
+    && value.y >= 0
+    && value.y <= 1;
+}
+
+function consumeRateLimit(socketId: string, event: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  let socketLimits = rateLimits.get(socketId);
+  if (!socketLimits) {
+    socketLimits = new Map();
+    rateLimits.set(socketId, socketLimits);
+  }
+
+  const current = socketLimits.get(event);
+  if (!current || now - current.windowStartedAt >= windowMs) {
+    socketLimits.set(event, { windowStartedAt: now, count: 1 });
+    return true;
+  }
+  if (current.count >= limit) return false;
+  current.count++;
+  return true;
+}
 
 function clearRoomTimer(roomId: string) {
   const existing = activeTimers.get(roomId);
@@ -82,8 +140,8 @@ export function setupSocketHandlers(io: TypedServer): void {
         clearInterval(selectTimer);
         // Auto-select first word if drawer didn't pick
         if (room.game.phase === 'word_select') {
-          const autoWord = words[0] || 'apple';
-          startDrawingPhase(room, autoWord);
+          const autoWord = words[0];
+          if (!autoWord || !startDrawingPhase(room, autoWord)) endRound(room, 'drawer_left');
         }
       }
     }, 1000);
@@ -91,9 +149,16 @@ export function setupSocketHandlers(io: TypedServer): void {
     activeTimers.set(room.id, selectTimer);
   }
 
-  function startDrawingPhase(room: Room, word: string) {
+  function startDrawingPhase(room: Room, word: string): boolean {
+    const drawerId = room.game.drawerId;
+    const drawer = drawerId ? room.players.get(drawerId) : undefined;
+    if (room.game.phase !== 'word_select'
+      || !drawer
+      || !io.sockets.sockets.has(drawer.socketId)) {
+      return false;
+    }
+    if (!room.game.setChosenWord(word)) return false;
     clearRoomTimer(room.id);
-    room.game.setChosenWord(word);
 
     // Notify all players of word length and masked representation
     io.to(room.id).emit('word_selected', {
@@ -131,9 +196,11 @@ export function setupSocketHandlers(io: TypedServer): void {
     }, 1000);
 
     activeTimers.set(room.id, roundTimer);
+    return true;
   }
 
   function endRound(room: Room, reason: 'timeout' | 'all_guessed' | 'drawer_left') {
+    if (room.game.phase !== 'word_select' && room.game.phase !== 'drawing') return;
     clearRoomTimer(room.id);
     room.game.phase = 'round_end';
 
@@ -186,26 +253,41 @@ export function setupSocketHandlers(io: TypedServer): void {
     io.to(room.id).emit('game_state', room.game.toJSON(room.id, room.players));
   }
 
+  function reject(socket: TypedSocket, message: string): void {
+    socket.emit('error_message', { message });
+  }
+
   io.on('connection', (socket: TypedSocket) => {
     // Ping check
     socket.on('ping_check', (timestamp, callback) => {
-      if (typeof callback === 'function') {
+      if (typeof timestamp === 'number' && Number.isFinite(timestamp) && typeof callback === 'function') {
         callback(timestamp);
       }
     });
 
     // 1. Create Room
-    socket.on('create_room', ({ hostName, avatar, settings }, callback) => {
+    socket.on('create_room', (payload, callback) => {
+      if (!isRecord(payload)
+        || !hasOnlyKeys(payload, ['hostName', 'avatar', 'settings'])
+        || !isValidName(payload.hostName)
+        || !isValidAvatar(payload.avatar)
+        || (payload.settings !== undefined && !isRecord(payload.settings))) {
+        callback?.({ success: false, error: 'Invalid room creation details.' });
+        return;
+      }
+      if (roomManager.findRoomBySocketId(socket.id)) {
+        callback?.({ success: false, error: 'Leave your current room before creating another.' });
+        return;
+      }
+
       try {
         const playerId = `p_${socket.id.substring(0, 6)}`;
-        const host = new Player(playerId, socket.id, hostName || 'Player 1', avatar || 'avatar_1', true);
-        const room = roomManager.createRoom(host, settings);
+        const host = new Player(playerId, socket.id, payload.hostName.trim(), payload.avatar || '🦊', true);
+        const room = roomManager.createRoom(host, payload.settings);
 
         socket.join(room.id);
 
-        if (typeof callback === 'function') {
-          callback({ success: true, roomId: room.id });
-        }
+        callback?.({ success: true, roomId: room.id });
 
         socket.emit('room_settings_updated', room.settings);
         io.to(room.id).emit('player_joined', {
@@ -213,53 +295,56 @@ export function setupSocketHandlers(io: TypedServer): void {
           players: room.getPlayersList()
         });
         emitGameState(room);
-      } catch (err: any) {
-        if (typeof callback === 'function') {
-          callback({ success: false, error: err.message || 'Failed to create room' });
-        }
+      } catch {
+        callback?.({ success: false, error: 'Invalid room creation details.' });
       }
     });
 
     // 2. Join Room
-    socket.on('join_room', ({ roomId, playerName, avatar }, callback) => {
-      const room = roomManager.getRoom(roomId);
+    socket.on('join_room', (payload, callback) => {
+      if (!isRecord(payload)
+        || !hasOnlyKeys(payload, ['roomId', 'playerName', 'avatar'])
+        || typeof payload.roomId !== 'string'
+        || !ROOM_ID_PATTERN.test(payload.roomId)
+        || !isValidName(payload.playerName)
+        || !isValidAvatar(payload.avatar)) {
+        callback?.({ success: false, error: 'Invalid room join details.' });
+        return;
+      }
+      if (roomManager.findRoomBySocketId(socket.id)) {
+        callback?.({ success: false, error: 'Leave your current room before joining another.' });
+        return;
+      }
+      const room = roomManager.getRoom(payload.roomId);
       if (!room) {
-        if (typeof callback === 'function') {
-          callback({ success: false, error: 'Room not found. Check the code and try again.' });
-        }
+        callback?.({ success: false, error: 'Room not found. Check the code and try again.' });
         return;
       }
 
       if (room.players.size >= room.settings.maxPlayers) {
-        if (typeof callback === 'function') {
-          callback({ success: false, error: 'Room is full.' });
-        }
+        callback?.({ success: false, error: 'Room is full.' });
         return;
       }
 
       const playerId = `p_${socket.id.substring(0, 6)}`;
-      const player = new Player(playerId, socket.id, playerName || `Player ${room.players.size + 1}`, avatar || 'avatar_1', false);
+      const player = new Player(playerId, socket.id, payload.playerName.trim(), payload.avatar || '🦊', false);
 
       const added = room.addPlayer(player);
       if (!added) {
-        if (typeof callback === 'function') {
-          callback({ success: false, error: 'Could not join room.' });
-        }
+        callback?.({ success: false, error: 'Could not join room.' });
         return;
       }
 
       socket.join(room.id);
 
-      if (typeof callback === 'function') {
-        callback({
-          success: true,
-          room: {
-            id: room.id,
-            settings: room.settings,
-            players: room.getPlayersList()
-          }
-        });
-      }
+      callback?.({
+        success: true,
+        room: {
+          id: room.id,
+          settings: room.settings,
+          players: room.getPlayersList()
+        }
+      });
 
       io.to(room.id).emit('player_joined', {
         player: player.toJSON(),
@@ -276,10 +361,18 @@ export function setupSocketHandlers(io: TypedServer): void {
 
     // 3. Ready Toggle
     socket.on('set_ready', (isReady) => {
+      if (typeof isReady !== 'boolean') {
+        reject(socket, 'Ready status must be a boolean.');
+        return;
+      }
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
+      if (room.game.phase !== 'lobby') {
+        reject(socket, 'Ready status can only be changed in the lobby.');
+        return;
+      }
       player.isReady = isReady;
       io.to(room.id).emit('players_updated', room.getPlayersList());
     });
@@ -294,6 +387,10 @@ export function setupSocketHandlers(io: TypedServer): void {
         socket.emit('error_message', { message: 'Only the room host can modify settings.' });
         return;
       }
+      if (room.game.phase !== 'lobby' || !isRecord(newSettings)) {
+        reject(socket, 'Room settings can only be changed in the lobby.');
+        return;
+      }
       try {
         room.updateSettings(newSettings);
         io.to(room.id).emit('room_settings_updated', room.settings);
@@ -305,14 +402,25 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     // 5. Start Game (Host only)
-    socket.on('start_game', () => {
+    socket.on('start_game', (payload?: unknown) => {
+      if (payload !== undefined) {
+        reject(socket, 'Invalid game start request.');
+        return;
+      }
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (!player.isHost) return;
+      if (room.hostId !== player.id) {
+        reject(socket, 'Only the room host can start the game.');
+        return;
+      }
+      if (room.game.phase !== 'lobby') {
+        reject(socket, 'The game has already started.');
+        return;
+      }
       if (room.players.size < 2) {
-        socket.emit('error_message', { message: 'Need at least 2 players to start!' });
+        reject(socket, 'Need at least 2 players to start!');
         return;
       }
 
@@ -321,32 +429,66 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     // 6. Word Chosen (Drawer only)
-    socket.on('word_chosen', ({ word }) => {
+    socket.on('word_chosen', (payload) => {
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (room.game.phase !== 'word_select') return;
-      if (room.game.drawerId !== player.id) return;
+      if (!isRecord(payload) || !hasOnlyKeys(payload, ['word']) || typeof payload.word !== 'string') {
+        reject(socket, 'Invalid word selection.');
+        return;
+      }
+      if (room.game.phase !== 'word_select') {
+        reject(socket, 'Words can only be selected during word selection.');
+        return;
+      }
+      if (room.game.drawerId !== player.id) {
+        reject(socket, 'Only the active drawer can select a word.');
+        return;
+      }
+      const word = payload.word.trim().toLowerCase();
+      if (payload.word.length > 30 || word.length === 0 || !room.game.wordOptions.includes(word)) {
+        reject(socket, 'Select one of the words offered by the server.');
+        return;
+      }
 
-      startDrawingPhase(room, word);
+      if (!startDrawingPhase(room, word)) reject(socket, 'The word selection is no longer valid.');
     });
 
     // 7. Drawing Events
     let currentStroke: DrawStroke | null = null;
 
     socket.on('draw_start', (data) => {
+      if (!consumeRateLimit(socket.id, 'draw_start', 30, 1000)) return;
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) return;
+      if (!isRecord(data)
+        || !hasOnlyKeys(data, ['x', 'y', 'color', 'size', 'tool'])
+        || !isValidPoint({ x: data.x, y: data.y })
+        || typeof data.color !== 'string'
+        || !HEX_COLOR_PATTERN.test(data.color)
+        || typeof data.size !== 'number'
+        || ![3, 6, 12, 24].includes(data.size)
+        || (data.tool !== undefined && data.tool !== 'brush' && data.tool !== 'eraser')) {
+        reject(socket, 'Invalid drawing stroke.');
+        return;
+      }
+      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) {
+        reject(socket, 'Only the active drawer can draw.');
+        return;
+      }
+      if (room.strokes.length >= MAX_ROOM_STROKES) {
+        reject(socket, 'The drawing has reached its stroke limit.');
+        return;
+      }
 
       currentStroke = {
         id: `s_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         tool: data.tool || 'brush',
-        color: data.color || '#000000',
-        size: data.size || 4,
+        color: data.color,
+        size: data.size,
         points: [{ x: data.x, y: data.y }]
       };
 
@@ -355,25 +497,43 @@ export function setupSocketHandlers(io: TypedServer): void {
     });
 
     socket.on('draw_move', (data) => {
+      if (!consumeRateLimit(socket.id, 'draw_move', 120, 1000)) return;
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) return;
-
-      if (currentStroke) {
-        currentStroke.points.push({ x: data.x, y: data.y });
+      if (!isValidPoint(data)) {
+        reject(socket, 'Invalid drawing coordinates.');
+        return;
+      }
+      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id || !currentStroke) {
+        reject(socket, 'Only the active drawer can draw.');
+        return;
       }
 
+      if (currentStroke.points.length >= MAX_STROKE_POINTS) {
+        reject(socket, 'The stroke has reached its point limit.');
+        return;
+      }
+
+      currentStroke.points.push({ x: data.x, y: data.y });
       socket.to(room.id).emit('draw_move', data);
     });
 
-    socket.on('draw_end', () => {
+    socket.on('draw_end', (payload?: unknown) => {
+      if (!consumeRateLimit(socket.id, 'draw_control', 30, 1000)) return;
+      if (payload !== undefined) {
+        reject(socket, 'Invalid stroke completion request.');
+        return;
+      }
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) return;
+      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) {
+        reject(socket, 'Only the active drawer can finish a stroke.');
+        return;
+      }
 
       if (currentStroke) {
         io.to(room.id).emit('draw_data', currentStroke);
@@ -382,40 +542,80 @@ export function setupSocketHandlers(io: TypedServer): void {
       socket.to(room.id).emit('draw_end');
     });
 
-    socket.on('canvas_clear', () => {
+    socket.on('canvas_clear', (payload?: unknown) => {
+      if (!consumeRateLimit(socket.id, 'draw_control', 30, 1000)) return;
+      if (payload !== undefined) {
+        reject(socket, 'Invalid canvas clear request.');
+        return;
+      }
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) return;
+      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) {
+        reject(socket, 'Only the active drawer can clear the canvas.');
+        return;
+      }
 
       room.clearCanvas();
+      currentStroke = null;
       io.to(room.id).emit('canvas_clear');
     });
 
-    socket.on('draw_undo', () => {
+    socket.on('draw_undo', (payload?: unknown) => {
+      if (!consumeRateLimit(socket.id, 'draw_control', 30, 1000)) return;
+      if (payload !== undefined) {
+        reject(socket, 'Invalid undo request.');
+        return;
+      }
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
 
-      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) return;
+      if (room.game.phase !== 'drawing' || room.game.drawerId !== player.id) {
+        reject(socket, 'Only the active drawer can undo strokes.');
+        return;
+      }
 
+      currentStroke = null;
       room.undoStroke();
       io.to(room.id).emit('canvas_sync', room.strokes);
     });
 
     // 8. Chat & Guessing Engine
-    socket.on('guess', ({ text }) => {
+    function receiveTextMessage(payload: unknown, isChat: boolean): void {
+      if (!consumeRateLimit(socket.id, 'text_message', 10, 5000)) return;
+      if (!isRecord(payload)
+        || !hasOnlyKeys(payload, ['text'])
+        || typeof payload.text !== 'string'
+        || payload.text.length > MESSAGE_MAX_LENGTH
+        || payload.text.trim().length === 0
+        || payload.text.trim().length > MESSAGE_MAX_LENGTH
+        || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(payload.text)) {
+        reject(socket, 'Messages must contain 1 to 50 valid characters.');
+        return;
+      }
+
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
+      const trimmed = payload.text.trim();
 
-      const trimmed = (text || '').trim();
-      if (!trimmed) return;
+      if (room.game.phase === 'drawing') {
+        if (player.id === room.game.drawerId) {
+          reject(socket, 'The drawer cannot chat or guess during their turn.');
+          return;
+        }
+        if (room.game.checkWord(trimmed).isCorrect) {
+          if (isChat || player.hasGuessed) {
+            reject(socket, 'Submit the word as a guess.');
+            return;
+          }
+        }
+      }
 
-      // If NOT in drawing phase, treat strictly as chat
-      if (room.game.phase !== 'drawing') {
-        const msg: ChatMessage = {
+      if (isChat || room.game.phase !== 'drawing' || player.hasGuessed) {
+        const message: ChatMessage = {
           id: `msg_${Date.now()}_${Math.random()}`,
           playerId: player.id,
           playerName: player.name,
@@ -423,85 +623,43 @@ export function setupSocketHandlers(io: TypedServer): void {
           type: 'chat',
           timestamp: Date.now()
         };
-        io.to(room.id).emit('chat_message', msg);
+        if (room.game.phase === 'drawing' && player.hasGuessed) socket.emit('chat_message', message);
+        else io.to(room.id).emit('chat_message', message);
         return;
       }
 
-      // If sender is Drawer: drawer cannot guess!
-      if (player.id === room.game.drawerId) {
-        const msg: ChatMessage = {
-          id: `msg_${Date.now()}_${Math.random()}`,
-          playerId: player.id,
-          playerName: player.name,
-          text: trimmed,
-          type: 'chat',
-          timestamp: Date.now()
-        };
-        io.to(room.id).emit('chat_message', msg);
-        return;
-      }
-
-      // If player already guessed the word in this round:
-      if (player.hasGuessed) {
-        // Broadcast only to other players who have also already guessed
-        const msg: ChatMessage = {
-          id: `msg_${Date.now()}_${Math.random()}`,
-          playerId: player.id,
-          playerName: player.name,
-          text: trimmed,
-          type: 'chat',
-          timestamp: Date.now()
-        };
-        socket.emit('chat_message', msg);
-        return;
-      }
-
-      // Check guess against target word
       const check = room.game.checkWord(trimmed);
-
       if (check.isCorrect) {
-        // Correct guess! (Ensure points awarded only once per round)
         player.hasGuessed = true;
         const guesserPoints = room.game.calculateGuessPoints();
         player.addScore(guesserPoints);
 
-        // Award drawer points
         const drawer = room.game.drawerId ? room.players.get(room.game.drawerId) : null;
-        if (drawer) {
-          drawer.addScore(Math.round(guesserPoints / 2));
-        }
+        if (drawer) drawer.addScore(Math.round(guesserPoints / 2));
 
-        // Notify room of correct guess without leaking the secret word text
         io.to(room.id).emit('guess_result', {
           correct: true,
           playerId: player.id,
           playerName: player.name,
           points: guesserPoints
         });
-
         io.to(room.id).emit('chat_message', {
           id: `sys_${Date.now()}`,
           text: `${player.name} guessed the word!`,
           type: 'correct',
           timestamp: Date.now()
         });
-
         io.to(room.id).emit('players_updated', room.getPlayersList());
         emitGameState(room);
 
-        // If everyone has guessed, finish round immediately!
-        if (room.allGuessedExceptDrawer()) {
-          endRound(room, 'all_guessed');
-        }
+        if (room.allGuessedExceptDrawer()) endRound(room, 'all_guessed');
       } else if (check.isClose) {
-        // Send private "close" notification to player
         socket.emit('guess_result', {
           correct: false,
           isClose: true,
           playerId: player.id,
           playerName: player.name
         });
-
         io.to(room.id).emit('chat_message', {
           id: `msg_${Date.now()}`,
           playerId: player.id,
@@ -511,7 +669,6 @@ export function setupSocketHandlers(io: TypedServer): void {
           timestamp: Date.now()
         });
       } else {
-        // Normal incorrect guess broadcasted to chat
         io.to(room.id).emit('chat_message', {
           id: `msg_${Date.now()}`,
           playerId: player.id,
@@ -521,10 +678,14 @@ export function setupSocketHandlers(io: TypedServer): void {
           timestamp: Date.now()
         });
       }
-    });
+    }
+
+    socket.on('guess', payload => receiveTextMessage(payload, false));
+    socket.on('chat', payload => receiveTextMessage(payload, true));
 
     // 9. Disconnect handling
     socket.on('disconnect', () => {
+      rateLimits.delete(socket.id);
       const found = roomManager.findRoomBySocketId(socket.id);
       if (!found) return;
       const { room, player } = found;
@@ -551,8 +712,8 @@ export function setupSocketHandlers(io: TypedServer): void {
         if (room.isEmpty()) {
           clearRoomTimer(room.id);
           roomManager.removeRoom(room.id);
-        } else if (wasDrawing && room.game.phase === 'drawing') {
-          // Drawer left during round -> advance to next round
+        } else if (wasDrawing && (room.game.phase === 'word_select' || room.game.phase === 'drawing')) {
+          currentStroke = null;
           endRound(room, 'drawer_left');
         }
       }

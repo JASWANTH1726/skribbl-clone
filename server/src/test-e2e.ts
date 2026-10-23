@@ -355,6 +355,7 @@ async function runE2ETestSuite() {
   });
   console.log(`\nScore: ${passCount} / ${results.length} tests passed.`);
   console.log('========================================\n');
+  if (passCount !== results.length) process.exitCode = 1;
 }
 
 runE2ETestSuite();
