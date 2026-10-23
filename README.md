@@ -145,7 +145,7 @@ The Render Blueprint in `render.yaml` creates one Node web service. The service 
 4. Wait for the initial deployment to finish, then open the service's `onrender.com` URL. Render health-checks `/api/health`.
 5. Confirm the page loads and Socket.IO connects before sharing the URL. The Render free plan may spin down when inactive, causing a delay on the first visit after inactivity.
 
-Alternatively, create a Node **Web Service** manually with the repository root as the root directory, build command `npm ci && npm run build`, and start command `npm start`.
+Alternatively, create a Node **Web Service** manually with the repository root as the root directory, build command `npm install --include=dev && npm run build`, and start command `npm start`. Development dependencies must be installed during the build because TypeScript compiles the server before the service starts.
 
 Deployments are triggered by pushes to the connected branch. Keep the frontend and backend in the same service unless you intentionally configure a separate frontend origin and backend CORS allowlist.
 
