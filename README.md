@@ -5,8 +5,8 @@ An end-to-end full-stack clone of **skribbl.io**, built with **React**, **TypeSc
 ---
 
 ## 🌐 Live Deployment
-* **Live Application URL**: `[DEPLOYMENT_PENDING: Add your Render live URL here after deployment, e.g. https://skribbl-clone-xxxx.onrender.com]`
-* **Status**: Ready for production deployment on Render.
+* **Live Application URL**: Not deployed yet. Add the Render URL after the service is created and verified.
+* **Status**: Configured for deployment to Render as a unified web service.
 
 ---
 
@@ -135,36 +135,19 @@ The server will start on `http://localhost:4000` and directly serve the producti
 
 ---
 
-## 🚀 Step-by-Step Render Deployment Guide
+## 🚀 Render Deployment
 
-Follow these exact steps to deploy the application on [Render](https://render.com/):
+The Render Blueprint in `render.yaml` creates one Node web service. The service builds the React client, then Express serves the built client and Socket.IO API from the same HTTPS origin. This preserves the existing architecture and avoids separate frontend/backend domain and CORS configuration.
 
-### Option A: Standard Web Service Setup (Recommended)
-1. Push your project code to a GitHub or GitLab repository.
-2. Sign in to your **Render Dashboard** and click **New +** → **Web Service**.
-3. Connect your repository.
-4. Configure the Web Service settings:
-   * **Name**: `skribbl-clone` (or your chosen name)
-   * **Region**: Oregon (US West) or closest to your location
-   * **Branch**: `main`
-   * **Root Directory**: Leave blank (root of repository)
-   * **Runtime**: `Node`
-   * **Build Command**:
-     ```bash
-     npm install && npm run build
-     ```
-   * **Start Command**:
-     ```bash
-     npm start
-     ```
-   * **Instance Type**: `Free`
-5. Click **Create Web Service**.
-6. Render will automatically build the client and server, start the unified process, and provide you with a live HTTPS URL (e.g. `https://skribbl-clone-xxxx.onrender.com`).
-7. Copy your live URL and paste it into the **Live Application URL** section above.
+1. Push the project to the connected GitHub repository.
+2. Sign in to the [Render Dashboard](https://dashboard.render.com/), choose **New +** → **Blueprint**, and connect the repository containing this `render.yaml`.
+3. Review the Blueprint and approve creation of the `skribbl-clone` web service.
+4. Wait for the initial deployment to finish, then open the service's `onrender.com` URL. Render health-checks `/api/health`.
+5. Confirm the page loads and Socket.IO connects before sharing the URL. The Render free plan may spin down when inactive, causing a delay on the first visit after inactivity.
 
-### Option B: Blueprint Deployment (`render.yaml`)
-1. Click **New +** → **Blueprint** on Render.
-2. Select your repository. Render will automatically detect the included `render.yaml` file and deploy the service with all settings pre-configured.
+Alternatively, create a Node **Web Service** manually with the repository root as the root directory, build command `npm ci && npm run build`, and start command `npm start`.
+
+Deployments are triggered by pushes to the connected branch. Keep the frontend and backend in the same service unless you intentionally configure a separate frontend origin and backend CORS allowlist.
 
 ---
 
@@ -174,6 +157,13 @@ The application is pre-configured to work out of the box with zero required envi
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `PORT` | `4000` | Port for the unified Express and Socket.IO server. (Render sets this automatically). |
-| `NODE_ENV` | `development` | Set to `production` in production environments. |
-| `VITE_SERVER_URL` | *None* | Optional override for frontend socket target if hosting client and server on separate domains. |
+| `PORT` | `4000` | Port for the unified Express and Socket.IO server. Render supplies this automatically. |
+| `NODE_ENV` | `development` | Set to `production` in production environments. The Blueprint sets this automatically. |
+| `CLIENT_ORIGINS` | *Empty* | Optional comma-separated exact origin allowlist for a separately hosted frontend (for example `https://game.example`). Do not include paths or use `*`. Same-origin deployment does not require this. |
+| `VITE_SERVER_URL` | Current page origin | Optional build-time override for the Socket.IO server when the frontend is hosted separately. Set it in the build environment to the backend's HTTPS URL; do not use localhost in production. |
+
+For separate frontend hosting, configure `CLIENT_ORIGINS` on the backend to the exact HTTPS frontend origin and set `VITE_SERVER_URL` when building the client. These variables are not needed for the unified Render Blueprint. Never put secrets in `VITE_*` variables because they are embedded in public frontend assets.
+
+### Health and real-time behavior
+
+`GET /api/health` returns service status and active room count. HTTP and Socket.IO CORS use the same exact-origin allowlist. WebSocket upgrades and polling are served by the same Express service. Game rooms and scores are held in memory, so use one backend instance; multiple instances would require shared game state and a Socket.IO adapter.

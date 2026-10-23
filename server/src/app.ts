@@ -4,15 +4,19 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { RoomManager } from './models/RoomManager.js';
+import { getAllowedOrigins, isOriginAllowed } from './cors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const clientDist = path.resolve(__dirname, '../../client/dist');
+const allowedOrigins = getAllowedOrigins();
 
 export function createApp(): Express {
   const app = express();
 
-  app.use(cors({ origin: '*' }));
+  app.use(cors({
+    origin: (origin, callback) => callback(null, isOriginAllowed(origin, allowedOrigins))
+  }));
   app.use(express.json());
 
   // Health check endpoint
