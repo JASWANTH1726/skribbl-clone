@@ -1,0 +1,22 @@
+{
+  "name": "skribbl-clone",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-time multiplayer drawing and guessing game clone of skribbl.io",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev:server": "npm --workspace=server run dev",
+    "dev:client": "npm --workspace=client run dev",
+    "build": "npm --workspace=shared run build && npm --workspace=server run build && npm --workspace=client run build",
+    "start": "npm --workspace=server run start",
+    "test": "npm --workspace=server test",
+    "test:e2e": "npm --workspace=server run test:e2e"
+  },
+  "keywords": ["skribbl", "multiplayer", "drawing", "socket.io", "react"],
+  "author": "",
+  "license": "ISC"
+}
