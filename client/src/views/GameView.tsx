@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useSocket } from '../context/SocketContext';
-import { GameState, LeaderboardEntry, PlayerData } from '@skribbl/shared';
+import { GameState, LeaderboardEntry, PlayerData, ServerToClientEvents } from '@skribbl/shared';
 import { Canvas } from '../components/canvas/Canvas';
 import { ChatBox } from '../components/chat/ChatBox';
 import { WordSelectModal } from '../components/modals/WordSelectModal';
@@ -11,14 +11,15 @@ import { Clock, Paintbrush, CheckCircle2, Crown, Trophy } from 'lucide-react';
 interface GameViewProps {
   roomId: string;
   players: PlayerData[];
+  initialGameState: GameState | null;
   initialWordOptions: string[];
   onPlayAgain: () => void;
 }
 
-export const GameView: React.FC<GameViewProps> = ({ roomId, players, initialWordOptions, onPlayAgain }) => {
+export const GameView: React.FC<GameViewProps> = ({ roomId, players, initialGameState, initialWordOptions, onPlayAgain }) => {
   const { socket, socketId } = useSocket();
 
-  const [gameState, setGameState] = useState<GameState>({
+  const [gameState, setGameState] = useState<GameState>(initialGameState ?? {
     roomId,
     phase: 'word_select',
     round: 1,
@@ -49,7 +50,7 @@ export const GameView: React.FC<GameViewProps> = ({ roomId, players, initialWord
       }
     };
 
-    const handleRoundStart = (data: any) => {
+    const handleRoundStart = (data: Parameters<ServerToClientEvents['round_start']>[0]) => {
       if (data.wordOptions) {
         setWordOptions(data.wordOptions);
       } else {
@@ -58,12 +59,12 @@ export const GameView: React.FC<GameViewProps> = ({ roomId, players, initialWord
       setRoundEndData(null);
     };
 
-    const handleRoundEnd = (data: any) => {
+    const handleRoundEnd = (data: Parameters<ServerToClientEvents['round_end']>[0]) => {
       setWordOptions([]);
       setRoundEndData({ word: data.word, scores: data.scores });
     };
 
-    const handleGameOver = (data: any) => {
+    const handleGameOver = (data: Parameters<ServerToClientEvents['game_over']>[0]) => {
       setGameOverData(data);
     };
 
@@ -71,6 +72,7 @@ export const GameView: React.FC<GameViewProps> = ({ roomId, players, initialWord
     socket.on('round_start', handleRoundStart);
     socket.on('round_end', handleRoundEnd);
     socket.on('game_over', handleGameOver);
+    socket.emit('request_game_state');
 
     return () => {
       socket.off('game_state', handleGameState);

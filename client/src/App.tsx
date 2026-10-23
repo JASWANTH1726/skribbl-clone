@@ -6,7 +6,7 @@ import { PlayerSetupScreen } from './components/PlayerSetupScreen';
 import { HomeView } from './views/HomeView';
 import { LobbyView } from './views/LobbyView';
 import { GameView } from './views/GameView';
-import { GamePhase, PlayerData, RoomSettings, ServerToClientEvents } from '@skribbl/shared';
+import { GamePhase, GameState, PlayerData, RoomSettings, ServerToClientEvents } from '@skribbl/shared';
 
 const DEFAULT_SETTINGS: RoomSettings = {
   maxPlayers: 8,
@@ -29,6 +29,7 @@ export const App: React.FC = () => {
   const [players, setPlayers] = useState<PlayerData[]>([]);
   const [roomSettings, setRoomSettings] = useState<RoomSettings>(DEFAULT_SETTINGS);
   const [gamePhase, setGamePhase] = useState<GamePhase>('lobby');
+  const [currentGameState, setCurrentGameState] = useState<GameState | null>(null);
   const [roundStartData, setRoundStartData] = useState<Parameters<ServerToClientEvents['round_start']>[0] | null>(null);
   const [isHost, setIsHost] = useState<boolean>(false);
 
@@ -51,7 +52,8 @@ export const App: React.FC = () => {
       setRoomSettings(settings);
     };
 
-    const handleGameState = (state: any) => {
+    const handleGameState = (state: GameState) => {
+      setCurrentGameState(state);
       setGamePhase(state.phase);
     };
 
@@ -79,6 +81,7 @@ export const App: React.FC = () => {
 
   const handleRoomJoined = useCallback((roomId: string, _playerName: string, hostFlag: boolean, settings?: RoomSettings) => {
     setRoundStartData(null);
+    setCurrentGameState(null);
     setCurrentRoomId(roomId);
     setIsHost(hostFlag);
     if (settings) setRoomSettings(settings);
@@ -92,6 +95,7 @@ export const App: React.FC = () => {
     setCurrentRoomId(null);
     setPlayers([]);
     setRoundStartData(null);
+    setCurrentGameState(null);
     setGamePhase('lobby');
     setIsHost(false);
   }, [socket]);
@@ -201,6 +205,7 @@ export const App: React.FC = () => {
           <GameView
             roomId={currentRoomId}
             players={players}
+            initialGameState={currentGameState}
             initialWordOptions={roundStartData?.wordOptions ?? []}
             onPlayAgain={handleLeaveRoom}
           />

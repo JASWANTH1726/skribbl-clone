@@ -4,7 +4,7 @@ import { createServer, Server as HttpServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { Server as SocketIOServer } from 'socket.io';
 import { io as createClient, Socket as ClientSocket } from 'socket.io-client';
-import { ClientToServerEvents, ServerToClientEvents } from '@skribbl/shared';
+import { ClientToServerEvents, GameState, ServerToClientEvents } from '@skribbl/shared';
 import { RoomManager } from './models/RoomManager.js';
 import { setupSocketHandlers, TypedServer } from './socket.js';
 
@@ -65,6 +65,26 @@ function waitForErrors(socket: TestClient, count: number): Promise<ErrorMessage[
 
 function waitForGuessResult(socket: TestClient): Promise<GuessResult> {
   return new Promise(resolve => socket.once('guess_result', resolve));
+}
+
+function waitForGameState(
+  socket: TestClient,
+  phase: GameState['phase'],
+  timeoutMs = 2000
+): Promise<GameState> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.off('game_state', handler);
+      reject(new Error(`Timed out waiting for game_state phase ${phase}.`));
+    }, timeoutMs);
+    const handler = (state: GameState) => {
+      if (state.phase !== phase) return;
+      clearTimeout(timeout);
+      socket.off('game_state', handler);
+      resolve(state);
+    };
+    socket.on('game_state', handler);
+  });
 }
 
 function delay(ms = 30): Promise<void> {
@@ -179,15 +199,108 @@ describe('Socket input validation and game authorization', () => {
     const { host, players, room } = await createTestRoom();
     const round = await startRound(host);
     const observer = players[1];
+    const drawingState = waitForGameState(host, 'drawing');
     const selectedPromise = waitForEvent<SelectedWord>(observer, 'word_selected');
     host.emit('word_chosen', { word: round.wordOptions![0] });
 
     const selected = await selectedPromise;
+    assert.equal((await drawingState).phase, 'drawing');
     assert.equal(room.game.phase, 'drawing');
     assert.equal(room.game.currentWord, round.wordOptions![0]);
     assert.equal(selected.wordLength, round.wordOptions![0].length);
     assert.equal('word' in selected, false);
     assert.equal(JSON.stringify(selected).includes(round.wordOptions![0]), false);
+  });
+
+  it('recovers the current selection state and choices for the active drawer', async () => {
+    const { host, room } = await createTestRoom();
+    const round = await startRound(host);
+    const statePromise = waitForGameState(host, 'word_select');
+    const roundStartPromise = waitForEvent<RoundStart>(
+      host,
+      'round_start',
+      2000,
+      data => Boolean(data.wordOptions?.length)
+    );
+
+    host.emit('request_game_state');
+
+    const state = await statePromise;
+    const recoveredRound = await roundStartPromise;
+    assert.equal(state.drawerId, room.game.drawerId);
+    assert.equal(state.phase, 'word_select');
+    assert.deepEqual(recoveredRound.wordOptions, round.wordOptions);
+    assert.equal(recoveredRound.drawerId, state.drawerId);
+  });
+
+  it('recovers public state without sending word choices or the secret to guessers', async () => {
+    const { host, players, room } = await createTestRoom();
+    const guesser = players[1];
+    const initialRoundStartPromise = waitForEvent<RoundStart>(guesser, 'round_start');
+    const round = await startRound(host);
+    const initialRoundStart = await initialRoundStartPromise;
+    assert.equal(initialRoundStart.wordOptions, undefined);
+    assert.equal(JSON.stringify(initialRoundStart).includes(round.wordOptions![0]), false);
+
+    const receivedRoundStarts: RoundStart[] = [];
+    const handleRoundStart = (data: RoundStart) => receivedRoundStarts.push(data);
+    guesser.on('round_start', handleRoundStart);
+    const statePromise = waitForGameState(guesser, 'word_select');
+
+    guesser.emit('request_game_state');
+
+    const state = await statePromise;
+    await delay();
+    guesser.off('round_start', handleRoundStart);
+    assert.equal(state.drawerId, room.game.drawerId);
+    assert.equal(state.phase, 'word_select');
+    assert.deepEqual(receivedRoundStarts, []);
+    assert.equal(JSON.stringify(state).includes(round.wordOptions![0]), false);
+  });
+
+  it('emits word choices for the drawer on later rounds', async () => {
+    const { host, players, room } = await createTestRoom();
+    const guesser = players[1];
+    const firstRound = await startRound(host);
+    await startDrawing(host, firstRound, guesser);
+
+    const secondTurnStart = waitForEvent<RoundStart>(
+      guesser,
+      'round_start',
+      6000,
+      data => data.round === 1 && Boolean(data.wordOptions?.length)
+    );
+    const correctGuess = waitForGuessResult(guesser);
+    guesser.emit('guess', { text: firstRound.wordOptions![0] });
+    assert.equal((await correctGuess).correct, true);
+
+    const secondTurn = await secondTurnStart;
+    await startDrawing(guesser, secondTurn, host);
+    const nextRoundStart = waitForEvent<RoundStart>(
+      host,
+      'round_start',
+      6000,
+      data => data.round === 2 && Boolean(data.wordOptions?.length)
+    );
+    const secondCorrectGuess = waitForGuessResult(host);
+    host.emit('guess', { text: secondTurn.wordOptions![0] });
+    assert.equal((await secondCorrectGuess).correct, true);
+
+    const nextRound = await nextRoundStart;
+    assert.ok(nextRound.wordOptions && nextRound.wordOptions.length > 0);
+    assert.equal(nextRound.drawerId, Array.from(room.players.values()).find(player => player.socketId === host.id)?.id);
+  });
+
+  it('automatically selects an offered word when the drawer does not choose within the timeout', async () => {
+    const { host, room } = await createTestRoom();
+    const round = await startRound(host);
+    const drawingState = waitForGameState(host, 'drawing', 25000);
+
+    const state = await drawingState;
+
+    assert.equal(room.game.phase, 'drawing');
+    assert.equal(room.game.currentWord, round.wordOptions![0]);
+    assert.equal(state.drawerId, room.game.drawerId);
   });
 
   it('rejects a word that was not offered without corrupting selection state', async () => {

@@ -428,6 +428,28 @@ export function setupSocketHandlers(io: TypedServer): void {
       startTurn(room);
     });
 
+    socket.on('request_game_state', (payload?: unknown) => {
+      if (payload !== undefined) {
+        reject(socket, 'Invalid game state request.');
+        return;
+      }
+      const found = roomManager.findRoomBySocketId(socket.id);
+      if (!found) return;
+      const { room, player } = found;
+
+      socket.emit('game_state', room.game.toJSON(room.id, room.players));
+      if (room.game.phase !== 'word_select' || room.game.drawerId !== player.id) return;
+
+      socket.emit('round_start', {
+        drawerId: player.id,
+        drawerName: player.name,
+        round: room.game.currentRound,
+        totalRounds: room.game.totalRounds,
+        drawTime: room.game.drawTime,
+        wordOptions: [...room.game.wordOptions]
+      });
+    });
+
     // 6. Word Chosen (Drawer only)
     socket.on('word_chosen', (payload) => {
       const found = roomManager.findRoomBySocketId(socket.id);

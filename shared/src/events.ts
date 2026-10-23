@@ -23,6 +23,7 @@ export interface ClientToServerEvents {
   set_ready: (isReady: boolean) => void;
   update_settings: (settings: Partial<RoomSettings>) => void;
   start_game: () => void;
+  request_game_state: () => void;
 
   // Drawing
   draw_start: (data: DrawStartPayload) => void;
